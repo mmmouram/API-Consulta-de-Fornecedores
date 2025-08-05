@@ -1,0 +1,204 @@
+// File: SupplierIntegrationApi.csproj
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.3.1" />
+  </ItemGroup>
+</Project>
+
+// File: appsettings.json
+{
+  "SupplierPortal": {
+    "BaseUrl": "https://api.supplierportal.com/rcs",
+    "ApiKey": "YOUR_SUPPLIER_PORTAL_API_KEY"
+  },
+  "PurchaseOrderSystem": {
+    "BaseUrl": "https://api.purchaseordersystem.com/integration",
+    "ApiKey": "YOUR_PO_SYSTEM_API_KEY"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+
+// File: Program.cs
+using SupplierIntegrationApi.Services;
+using Microsoft.OpenApi.Models;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Configuration
+builder.Services.Configure<SupplierPortalOptions>(builder.Configuration.GetSection("SupplierPortal"));
+builder.Services.Configure<PurchaseOrderOptions>(builder.Configuration.GetSection("PurchaseOrderSystem"));
+
+// Add services
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "Supplier Integration API", Version = "v1" });
+});
+
+// Typed HTTP clients
+builder.Services.AddHttpClient<ISupplierPortalClient, SupplierPortalClient>(client =>
+{
+    var opts = builder.Configuration.GetSection("SupplierPortal").Get<SupplierPortalOptions>();
+    client.BaseAddress = new Uri(opts.BaseUrl);
+    client.DefaultRequestHeaders.Add("X-Api-Key", opts.ApiKey);
+});
+
+builder.Services.AddHttpClient<IPurchaseOrderClient, PurchaseOrderClient>(client =>
+{
+    var opts = builder.Configuration.GetSection("PurchaseOrderSystem").Get<PurchaseOrderOptions>();
+    client.BaseAddress = new Uri(opts.BaseUrl);
+    client.DefaultRequestHeaders.Add("X-Api-Key", opts.ApiKey);
+});
+
+var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+    app.UseSwagger();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Supplier Integration API v1"));
+}
+
+app.UseHttpsRedirection();
+
+app.MapControllers();
+
+app.Run();
+
+// File: Options/SupplierPortalOptions.cs
+namespace SupplierIntegrationApi.Services;
+public record SupplierPortalOptions
+{
+    public string BaseUrl { get; init; } = string.Empty;
+    public string ApiKey { get; init; } = string.Empty;
+}
+
+// File: Options/PurchaseOrderOptions.cs
+namespace SupplierIntegrationApi.Services;
+public record PurchaseOrderOptions
+{
+    public string BaseUrl { get; init; } = string.Empty;
+    public string ApiKey { get; init; } = string.Empty;
+}
+
+// File: Models/RcDto.cs
+namespace SupplierIntegrationApi.Models;
+public class RcDto
+{
+    public string Id { get; set; } = string.Empty;
+    public string Cnpj { get; set; } = string.Empty;
+    public DateTime Date { get; set; }
+    public string Description { get; set; } = string.Empty;
+}
+
+// File: Services/ISupplierPortalClient.cs
+using SupplierIntegrationApi.Models;
+
+namespace SupplierIntegrationApi.Services;
+public interface ISupplierPortalClient
+{
+    Task<IEnumerable<RcDto>> GetRcsByCnpjAsync(string cnpj);
+}
+
+// File: Services/SupplierPortalClient.cs
+using SupplierIntegrationApi.Models;
+using System.Net.Http.Json;
+
+namespace SupplierIntegrationApi.Services;
+public class SupplierPortalClient : ISupplierPortalClient
+{
+    private readonly HttpClient _httpClient;
+
+    public SupplierPortalClient(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    public async Task<IEnumerable<RcDto>> GetRcsByCnpjAsync(string cnpj)
+    {
+        var response = await _httpClient.GetAsync($"?cnpj={cnpj}");
+        response.EnsureSuccessStatusCode();
+        var rcs = await response.Content.ReadFromJsonAsync<IEnumerable<RcDto>>();
+        return rcs ?? Array.Empty<RcDto>();
+    }
+}
+
+// File: Services/IPurchaseOrderClient.cs
+using SupplierIntegrationApi.Models;
+
+namespace SupplierIntegrationApi.Services;
+public interface IPurchaseOrderClient
+{
+    Task NotifyRcsAsync(IEnumerable<RcDto> rcs);
+}
+
+// File: Services/PurchaseOrderClient.cs
+using SupplierIntegrationApi.Models;
+using System.Net.Http.Json;
+
+namespace SupplierIntegrationApi.Services;
+public class PurchaseOrderClient : IPurchaseOrderClient
+{
+    private readonly HttpClient _httpClient;
+
+    public PurchaseOrderClient(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+    }
+
+    public async Task NotifyRcsAsync(IEnumerable<RcDto> rcs)
+    {
+        var response = await _httpClient.PostAsJsonAsync("/rcs/notify", rcs);
+        response.EnsureSuccessStatusCode();
+    }
+}
+
+// File: Controllers/RcsController.cs
+using Microsoft.AspNetCore.Mvc;
+using SupplierIntegrationApi.Models;
+using SupplierIntegrationApi.Services;
+
+namespace SupplierIntegrationApi.Controllers;
+
+[ApiController]
+[Route("api/[controller]")]
+public class RcsController : ControllerBase
+{
+    private readonly ISupplierPortalClient _supplierClient;
+    private readonly IPurchaseOrderClient _poClient;
+
+    public RcsController(ISupplierPortalClient supplierClient, IPurchaseOrderClient poClient)
+    {
+        _supplierClient = supplierClient;
+        _poClient = poClient;
+    }
+
+    /// <summary>
+    /// Consulta RCs por CNPJ e notifica o sistema de pedidos.
+    /// </summary>
+    [HttpGet("{cnpj}")]
+    public async Task<IActionResult> GetByCnpj(string cnpj)
+    {
+        if (string.IsNullOrWhiteSpace(cnpj))
+            return BadRequest("CNPJ is required.");
+
+        var rcs = await _supplierClient.GetRcsByCnpjAsync(cnpj);
+        if (!rcs.Any())
+            return NotFound("No RCs found for the provided CNPJ.");
+
+        await _poClient.NotifyRcsAsync(rcs);
+        return Ok(rcs);
+    }
+}
